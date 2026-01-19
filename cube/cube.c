@@ -55,11 +55,9 @@
 #define APP_NAME_STR_LEN 80
 #endif  // _WIN32
 
-// Volk requires VK_NO_PROTOTYPES before including vulkan.h
-#define VK_NO_PROTOTYPES
+#include "cube_functions.h"
+
 #include <vulkan/vulkan.h>
-#define VOLK_IMPLEMENTATION
-#include "volk.h"
 
 #include "linmath.h"
 #include "object_type_string_helper.h"
@@ -445,6 +443,7 @@ struct demo {
     struct wl_seat *seat;
     struct wl_pointer *pointer;
     struct wl_keyboard *keyboard;
+    int pending_width, pending_height;
 #endif
 #if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
     IDirectFB *dfb;
@@ -1145,7 +1144,7 @@ void DemoUpdateTargetIPD(struct demo *demo) {
         }
 
         if (calibrate_next) {
-            int64_t multiple = demo->next_present_id - past[count - 1].presentID;
+            int64_t multiple = demo->next_present_id - past[count - 1].presentID - 1;
             demo->prev_desired_present_time = (past[count - 1].actualPresentTime + (multiple * demo->target_IPD));
         }
         free(past);
@@ -1302,8 +1301,9 @@ static void demo_draw(struct demo *demo) {
         present.pNext = &regions;
     }
 
+    VkPresentTimesInfoGOOGLE present_time;
+    VkPresentTimeGOOGLE ptime;
     if (demo->VK_GOOGLE_display_timing_enabled) {
-        VkPresentTimeGOOGLE ptime;
         if (demo->prev_desired_present_time == 0) {
             // This must be the first present for this swapchain.
             //
@@ -1326,15 +1326,14 @@ static void demo_draw(struct demo *demo) {
         ptime.presentID = demo->next_present_id++;
         demo->prev_desired_present_time = ptime.desiredPresentTime;
 
-        VkPresentTimesInfoGOOGLE present_time = {
+        present_time = (VkPresentTimesInfoGOOGLE){
             .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
             .pNext = present.pNext,
             .swapchainCount = present.swapchainCount,
             .pTimes = &ptime,
         };
-        if (demo->VK_GOOGLE_display_timing_enabled) {
-            present.pNext = &present_time;
-        }
+
+        present.pNext = &present_time;
     }
 
     err = vkQueuePresentKHR(demo->present_queue, &present);
@@ -1353,8 +1352,6 @@ static void demo_draw(struct demo *demo) {
         assert(!err);
         if (surfCapabilities.currentExtent.width != (uint32_t)demo->width ||
             surfCapabilities.currentExtent.height != (uint32_t)demo->height) {
-            demo->width = surfCapabilities.currentExtent.width;
-            demo->height = surfCapabilities.currentExtent.height;
             demo_resize(demo);
         }
     } else if (err == VK_ERROR_SURFACE_LOST_KHR) {
@@ -1375,6 +1372,12 @@ static void demo_prepare_framebuffers(struct demo *demo);
 static void demo_prepare_swapchain(struct demo *demo) {
     VkResult U_ASSERT_ONLY err;
     VkSwapchainKHR oldSwapchain = demo->swapchain;
+
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+    if (demo->wsi_platform == WSI_PLATFORM_WAYLAND && !demo->xdg_surface_has_been_configured) {
+        return;
+    }
+#endif
 
     // Check the surface capabilities and formats
     VkSurfaceCapabilitiesKHR surfCapabilities;
@@ -2659,6 +2662,7 @@ static void demo_cleanup(struct demo *demo) {
 #endif
 
     vkDestroyInstance(demo->inst, NULL);
+    unload_vulkan_library();
 }
 
 static void demo_resize(struct demo *demo) {
@@ -2857,6 +2861,7 @@ static void demo_create_xlib_window(struct demo *demo) {
     XMapWindow(demo->xlib_display, demo->xlib_window);
     XFlush(demo->xlib_display);
     demo->xlib_wm_delete_window = XInternAtom(demo->xlib_display, "WM_DELETE_WINDOW", False);
+    XSetWMProtocols(demo->xlib_display, demo->xlib_window, &demo->xlib_wm_delete_window, 1);
 }
 static void demo_handle_xlib_event(struct demo *demo, const XEvent *event) {
     switch (event->type) {
@@ -2994,6 +2999,15 @@ static void demo_create_xcb_window(struct demo *demo) {
     xcb_create_window(demo->connection, XCB_COPY_FROM_PARENT, demo->xcb_window, demo->screen->root, 0, 0, demo->width, demo->height,
                       0, XCB_WINDOW_CLASS_INPUT_OUTPUT, demo->screen->root_visual, value_mask, value_list);
 
+    char *name = "Vkcube X11";
+    xcb_intern_atom_cookie_t net_wm_name_cookie = xcb_intern_atom(demo->connection, 0, strlen("_NET_WM_NAME"), "_NET_WM_NAME");
+    xcb_intern_atom_cookie_t utf8_string_cookie = xcb_intern_atom(demo->connection, 0, strlen("UTF8_STRING"), "UTF8_STRING");
+    xcb_intern_atom_reply_t *net_wm_name_reply = xcb_intern_atom_reply(demo->connection, net_wm_name_cookie, NULL);
+    xcb_intern_atom_reply_t *utf8_string_reply = xcb_intern_atom_reply(demo->connection, utf8_string_cookie, NULL);
+    xcb_change_property(demo->connection, XCB_PROP_MODE_REPLACE,
+                        demo->xcb_window, net_wm_name_reply->atom,
+                        utf8_string_reply->atom, 8, strlen(name), name);
+
     /* Magic code that will send notification when window is destroyed */
     xcb_intern_atom_cookie_t cookie = xcb_intern_atom(demo->connection, 1, 12, "WM_PROTOCOLS");
     xcb_intern_atom_reply_t *reply = xcb_intern_atom_reply(demo->connection, cookie, 0);
@@ -3048,10 +3062,14 @@ static void demo_run(struct demo *demo) {
 static void handle_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial) {
     struct demo *demo = (struct demo *)data;
     xdg_surface_ack_configure(xdg_surface, serial);
-    if (demo->xdg_surface_has_been_configured) {
-        demo_resize(demo);
-    }
     demo->xdg_surface_has_been_configured = 1;
+    if (demo->pending_width > 0) {
+        demo->width = demo->pending_width;
+    }
+    if (demo->pending_height > 0) {
+        demo->height = demo->pending_height;
+    }
+    demo_resize(demo);
 }
 
 static const struct xdg_surface_listener xdg_surface_listener = {handle_surface_configure};
@@ -3062,10 +3080,10 @@ static void handle_toplevel_configure(void *data, struct xdg_toplevel *xdg_tople
     /* zero values imply the program may choose its own size, so in that case
      * stay with the existing value (which on startup is the default) */
     if (width > 0) {
-        demo->width = width;
+        demo->pending_width = width;
     }
     if (height > 0) {
-        demo->height = height;
+        demo->pending_height = height;
     }
     /* This should be followed by a surface configure */
 }
@@ -3746,6 +3764,30 @@ static const char *demo_init_wayland_connection(struct demo *demo) {
 // If the wsi_platform is AUTO, this function also sets wsi_platform to the first available WSI platform
 // Otherwise, it errors out if the specified wsi_platform isn't available
 static void demo_check_and_set_wsi_platform(struct demo *demo) {
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+    if (demo->wsi_platform == WSI_PLATFORM_WAYLAND || demo->wsi_platform == WSI_PLATFORM_AUTO) {
+        bool wayland_extension_available = false;
+        for (uint32_t i = 0; i < demo->enabled_extension_count; i++) {
+            if (strcmp(demo->extension_names[i], VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME) == 0) {
+                wayland_extension_available = true;
+                break;
+            }
+        }
+        if (wayland_extension_available) {
+            const char *error_msg = demo_init_wayland_connection(demo);
+            if (error_msg != NULL) {
+                if (demo->wsi_platform == WSI_PLATFORM_WAYLAND) {
+                    fprintf(stderr, "%s\nExiting ...\n", error_msg);
+                    fflush(stdout);
+                    exit(1);
+                }
+            } else {
+                demo->wsi_platform = WSI_PLATFORM_WAYLAND;
+                return;
+            }
+        }
+    }
+#endif
 #if defined(VK_USE_PLATFORM_XCB_KHR)
     if (demo->wsi_platform == WSI_PLATFORM_XCB || demo->wsi_platform == WSI_PLATFORM_AUTO) {
         bool xcb_extension_available = false;
@@ -3789,30 +3831,6 @@ static void demo_check_and_set_wsi_platform(struct demo *demo) {
                 }
             } else {
                 demo->wsi_platform = WSI_PLATFORM_XLIB;
-                return;
-            }
-        }
-    }
-#endif
-#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
-    if (demo->wsi_platform == WSI_PLATFORM_WAYLAND || demo->wsi_platform == WSI_PLATFORM_AUTO) {
-        bool wayland_extension_available = false;
-        for (uint32_t i = 0; i < demo->enabled_extension_count; i++) {
-            if (strcmp(demo->extension_names[i], VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME) == 0) {
-                wayland_extension_available = true;
-                break;
-            }
-        }
-        if (wayland_extension_available) {
-            const char *error_msg = demo_init_wayland_connection(demo);
-            if (error_msg != NULL) {
-                if (demo->wsi_platform == WSI_PLATFORM_WAYLAND) {
-                    fprintf(stderr, "%s\nExiting ...\n", error_msg);
-                    fflush(stdout);
-                    exit(1);
-                }
-            } else {
-                demo->wsi_platform = WSI_PLATFORM_WAYLAND;
                 return;
             }
         }
@@ -3889,7 +3907,7 @@ static void demo_check_and_set_wsi_platform(struct demo *demo) {
             }
         }
         if (qnx_extension_available) {
-            demo->wsi_platform = WSI_PLATFORM_ANDROID;
+            demo->wsi_platform = WSI_PLATFORM_QNX;
             return;
         }
     }
@@ -3922,7 +3940,7 @@ static void demo_init_vk(struct demo *demo) {
     demo->is_minimized = false;
     demo->cmd_pool = VK_NULL_HANDLE;
 
-    err = volkInitialize();
+    err = load_vulkan_library();
     if (err != VK_SUCCESS) {
         ERR_EXIT(
             "Unable to find the Vulkan runtime on the system.\n\n"
@@ -4220,7 +4238,7 @@ static void demo_init_vk(struct demo *demo) {
             "vkCreateInstance Failure");
     }
 
-    volkLoadInstance(demo->inst);
+    load_vulkan_instance_functions(demo->inst);
 }
 
 static void demo_select_physical_device(struct demo *demo) {
@@ -4467,7 +4485,7 @@ static void demo_create_device(struct demo *demo) {
     err = vkCreateDevice(demo->gpu, &device, NULL, &demo->device);
     assert(!err);
 
-    volkLoadDevice(demo->device);
+    load_vulkan_device_functions(demo->device);
 }
 
 static void demo_create_surface(struct demo *demo) {

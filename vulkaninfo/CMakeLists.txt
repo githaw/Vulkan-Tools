@@ -93,6 +93,7 @@ if (CMAKE_SYSTEM_NAME MATCHES "Linux|BSD|GNU")
         target_compile_definitions(vulkaninfo PRIVATE VK_USE_PLATFORM_DIRECTFB_EXT)
         target_link_libraries(vulkaninfo PRIVATE PkgConfig::DirectFB)
     endif()
+    target_compile_definitions(vulkaninfo PRIVATE VK_USE_PLATFORM_DISPLAY)
 endif()
 
 if(APPLE)
@@ -109,7 +110,6 @@ endif()
 target_link_libraries(vulkaninfo PRIVATE
     Vulkan::Headers
     ${CMAKE_DL_LIBS}
-    volk::volk_headers
 )
 
 if(WIN32)
