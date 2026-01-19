@@ -70,7 +70,7 @@ def generate_apk(SDK_ROOT : str, CMAKE_INSTALL_DIR : str) -> str:
 
     android_manifest = get_android_manifest()
 
-    android_jar = f"{SDK_ROOT}/platforms/android-26/android.jar"
+    android_jar = f"{SDK_ROOT}/platforms/android-33/android.jar"
     if not os.path.isfile(android_jar):
         print(f"Unable to find {android_jar}!")
         sys.exit(-1)
@@ -181,7 +181,7 @@ def main():
         cmake_cmd += f' -D CMAKE_INSTALL_LIBDIR={lib_dir}'
         cmake_cmd += f' -D CMAKE_ANDROID_STL_TYPE={android_stl}'
 
-        cmake_cmd += ' -D ANDROID_PLATFORM=26'
+        cmake_cmd += ' -D ANDROID_PLATFORM=33'
         cmake_cmd += ' -D ANDROID_USE_LEGACY_TOOLCHAIN_FILE=NO'
 
         RunShellCmd(cmake_cmd)
